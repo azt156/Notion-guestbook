@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>簡潔風留言板</title>
+    <!-- 載入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* 使用 Inter 字體，風格更接近 Notion */
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* 支援 Inter 字體 */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    </style>
+</head>
+<body class="bg-gray-100 flex items-center justify-center min-h-screen p-4">
+
+    <div class="w-full max-w-2xl bg-white rounded-xl shadow-sm p-6 md:p-8">
+        
+        <!-- 標題 -->
+        <h1 class="text-2xl md:text-3xl font-bold text-gray-900 mb-6">
+            留言給我
+        </h1>
+
+        <!-- 留言表單 -->
+        <form id="comment-form" class="space-y-4">
+            <div>
+                <label for="name" class="block text-sm font-medium text-gray-700 mb-1">您的名字</label>
+                <input type="text" id="name" name="name" required
+                       class="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-900 focus:border-transparent transition duration-200"
+                       placeholder="請輸入您的顯示名稱">
+            </div>
+            <div>
+                <label for="message" class="block text-sm font-medium text-gray-700 mb-1">您的訊息</label>
+                <textarea id="message" name="message" rows="4" required
+                          class="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-gray-900 focus:border-transparent transition duration-200"
+                          placeholder="在這裡留下您的訊息..."></textarea>
+            </div>
+            <!-- 錯誤訊息顯示區 -->
+            <div id="error-message" class="text-red-600 text-sm"></div>
+            <div>
+                <button type="submit" id="submit-button"
+                        class="w-full p-3 bg-gray-900 text-white rounded-lg font-medium hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:ring-opacity-50 transition duration-200">
+                    送出留言
+                </button>
+            </div>
+        </form>
+
+        <!-- 留言列表 -->
+        <div class="mt-10">
+            <h2 class="text-xl font-semibold text-gray-900 mb-4 border-b pb-2">
+                訪客留言
+            </h2>
+            
+            <!-- 載入中提示 -->
+            <div id="loading-indicator" class="text-center text-gray-500 py-4">
+                載入中...
+            </div>
+            
+            <!-- 留言將動態插入此處 -->
+            <div id="comments-list" class="space-y-5">
+                <!-- 
+                留言項目範本:
+                <div class="bg-gray-50 p-4 rounded-lg shadow-sm">
+                    <div class="flex justify-between items-center">
+                        <span class="font-semibold text-gray-800">訪客名稱</span>
+                        <span class="text-xs text-gray-500">2025/10/31 15:30</span>
+                    </div>
+                    <p class="text-gray-700 mt-2 whitespace-pre-wrap">這是留言內容。</p>
+                </div> 
+                -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Firebase SDK -->
+    <script type="module">
+        // 匯入 Firebase 模組
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { 
+            getFirestore, 
+            collection, 
+            addDoc, 
+            query, 
+            onSnapshot, 
+            Timestamp,
+            setLogLevel,
+            doc,      // <-- [NEW] 匯入 doc
+            updateDoc, // <-- [NEW] 匯入 updateDoc
+            deleteDoc  // <-- [NEW] 匯入 deleteDoc
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { 
+            getAuth, 
+            signInAnonymously, 
+            signInWithCustomToken, 
+            onAuthStateChanged 
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+
+        // 顯示 Firestore 詳細日誌
+        setLogLevel('Debug');
+
+        // --- [NEW] 版主 & 過濾 設定 ---
+        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        // !! 重要：請將 "YOUR_OWN_UID_HERE" 替換為您自己的 Firebase UID
+        // !! (請執行一次，查看瀏覽器 console 的 "Firebase 使用者已認證 (UID):" 輸出)
+        // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        const ADMIN_UID = "00790050385915248294"; 
+
+        // [NEW] 不雅字眼過濾清單 (簡易版)
+        // 您可以在這裡新增更多不想看到的字眼
+        const BAD_WORDS = ['髒話', '不雅字眼', '廣告', '三字經'];
+
+        // ---------------------------------
+
+        // --- 1. Firebase 初始化 ---
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-guestbook';
+        
+        let db, auth, commentsCol;
+        let currentAdminUID = null; // [NEW] 儲存目前登入者的 UID
+        
+        // 初始化 Firebase
+        try {
+            const app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+            
+            // 設定公開留言版的集合路徑
+            const commentsCollectionPath = `/artifacts/${appId}/public/data/guestbook-comments`;
+            commentsCol = collection(db, commentsCollectionPath);
+
+        } catch (e) {
+            console.error("Firebase 初始化失敗:", e);
+            document.getElementById("loading-indicator").innerText = "留言板載入失敗。";
+            // [FIX] 移除了這裡的 'return;'，因为它在模組的頂層，會導致 SyntaxError
+        }
+
+        // --- 2. 取得 DOM 元素 ---
+        const commentForm = document.getElementById('comment-form');
+        const nameInput = document.getElementById('name');
+        const messageInput = document.getElementById('message');
+        const commentsList = document.getElementById('comments-list');
+        const loadingIndicator = document.getElementById('loading-indicator');
+        const submitButton = document.getElementById('submit-button');
+        const errorMessageEl = document.getElementById('error-message'); // [NEW] 錯誤訊息元素
+
+        // --- 3. 處理留言提交 ---
+        const handleSubmit = async (e) => {
+            e.preventDefault(); // 防止表單重新整理頁面
+
+            const name = nameInput.value.trim();
+            const message = messageInput.value.trim();
+            
+            errorMessageEl.textContent = ""; // [NEW] 提交前清除錯誤訊息
+
+            if (name === "" || message === "") {
+                errorMessageEl.textContent = "名字和訊息欄位都不能為空喔！"; // [NEW] 顯示錯誤
+                console.warn("名字和訊息欄位都不能為空喔！"); 
+                return;
+            }
+
+            // [NEW] 檢查不雅字眼
+            const lowerMessage = message.toLowerCase();
+            if (BAD_WORDS.some(word => lowerMessage.includes(word.toLowerCase()))) {
+                errorMessageEl.textContent = "偵測到不當內容，請修改後再提交。";
+                console.warn("偵測到不雅字眼");
+                return; // 中止提交
+            }
+
+            // 暫時禁用按鈕，防止重複提交
+            submitButton.disabled = true;
+            submitButton.innerText = "傳送中...";
+
+            try {
+                // 建立新的留言物件
+                const newComment = {
+                    name: name,
+                    message: message,
+                    timestamp: Timestamp.now() // 使用 Firestore 伺服器時間
+                };
+
+                // 將留言寫入 Firestore
+                await addDoc(commentsCol, newComment);
+
+                // 清空輸入框
+                nameInput.value = "";
+                messageInput.value = "";
+
+            } catch (error) {
+                console.error("新增留言失敗:", error);
+                // 同上，這裡也應該用自訂提示框
+                console.error("留言失敗，請稍後再試。");
+            } finally {
+                // 重新啟用按鈕
+                submitButton.disabled = false;
+                submitButton.innerText = "送出留言";
+            }
+        };
+
+        // --- 4. 渲染單一留言 ---
+        const renderComment = (comment, docId) => { // [NEW] 增加 docId 參數
+            const commentEl = document.createElement('div');
+            commentEl.className = 'bg-gray-50 p-4 rounded-lg shadow-sm animate-fade-in'; 
+            
+            // 轉換 Firestore Timestamp 為可讀日期時間
+            const timestamp = comment.timestamp ? comment.timestamp.toDate().toLocaleString('zh-TW', {
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit'
+            }) : '時間未知';
+            
+            // 使用 innerHTML 確保換行符號 (來自 textarea) 可以被正確呈現
+            // 透過 textContent 插入使用者輸入，防止 XSS
+            const nameEl = document.createElement('span');
+            nameEl.className = 'font-semibold text-gray-800';
+            nameEl.textContent = comment.name;
+
+            const timeEl = document.createElement('span');
+            timeEl.className = 'text-xs text-gray-500';
+            timeEl.textContent = timestamp;
+
+            const headerEl = document.createElement('div');
+            headerEl.className = 'flex justify-between items-center';
+            headerEl.appendChild(nameEl);
+            headerEl.appendChild(timeEl);
+
+            const messageEl = document.createElement('p');
+            messageEl.className = 'text-gray-700 mt-2 whitespace-pre-wrap';
+            messageEl.textContent = comment.message; // 確保訊息安全
+
+            commentEl.appendChild(headerEl);
+            commentEl.appendChild(messageEl);
+
+            // [NEW] 如果是版主，顯示管理員按鈕
+            if (currentAdminUID && currentAdminUID === ADMIN_UID) {
+                const adminActions = document.createElement('div');
+                adminActions.className = 'admin-actions flex items-center space-x-2 mt-3'; // 加上 class 供 reply 辨識
+
+                // 刪除按鈕
+                const deleteBtn = document.createElement('button');
+                deleteBtn.textContent = '刪除';
+                deleteBtn.className = 'text-xs text-red-500 hover:text-red-700 font-medium';
+                deleteBtn.onclick = () => handleDeleteComment(docId);
+                
+                // 回覆按鈕
+                const replyBtn = document.createElement('button');
+                replyBtn.textContent = '回覆';
+                replyBtn.className = 'text-xs text-blue-500 hover:text-blue-700 font-medium';
+                replyBtn.onclick = () => handleShowReply(commentEl, docId, comment.replyText);
+
+                adminActions.appendChild(replyBtn);
+                adminActions.appendChild(deleteBtn);
+                commentEl.appendChild(adminActions);
+            }
+
+            // [NEW] 如果有版主回覆，顯示回覆內容
+            if (comment.replyText) {
+                const replyEl = document.createElement('div');
+                replyEl.className = 'mt-3 ml-4 pl-3 border-l-2 border-gray-300';
+                
+                const replyHeader = document.createElement('span');
+                replyHeader.className = 'font-semibold text-sm text-gray-800';
+                replyHeader.textContent = '版主回覆';
+                
+                const replyBody = document.createElement('p');
+                replyBody.className = 'text-sm text-gray-700 whitespace-pre-wrap';
+                replyBody.textContent = comment.replyText;
+                
+                replyEl.appendChild(replyHeader);
+                replyEl.appendChild(replyBody);
+                commentEl.appendChild(replyEl);
+            }
+
+            return commentEl;
+        };
+
+        // --- 5. 監聽 Firebase 認證與載入留言 ---
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                console.log("Firebase 使用者已認證 (UID):", user.uid); // <-- [重要] 在此查看您的 UID
+                currentAdminUID = user.uid; // [NEW] 儲存 UID
+                // 使用者已登入，開始監聽留言
+                loadComments();
+            } else {
+                console.log("使用者未登入，嘗試匿名登入...");
+                // 嘗試匿名登入
+                const token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                if (token) {
+                    signInWithCustomToken(auth, token).catch(err => {
+                        console.error("Custom token 登入失敗:", err);
+                        signInAnonymously(auth).catch(err => console.error("匿名登入失敗:", err));
+                    });
+                } else {
+                    signInAnonymously(auth).catch(err => console.error("匿名登入失敗:", err));
+                }
+            }
+        });
+
+        // --- 6. 載入並即時監聽留言 ---
+        const loadComments = () => {
+            // 建立查詢
+            const q = query(commentsCol);
+
+            // 設置即時監聽
+            onSnapshot(q, (snapshot) => {
+                loadingIndicator.style.display = 'none'; // 隱藏載入提示
+                commentsList.innerHTML = ''; // 清空現有列表
+
+                if (snapshot.empty) {
+                    commentsList.innerHTML = '<p class="text-center text-gray-500">還沒有人留言，快來搶頭香吧！</p>';
+                    return;
+                }
+                
+                // 取得所有留言
+                let comments = [];
+                snapshot.forEach(doc => {
+                    // [NEW] 儲存 doc.id 以及 data
+                    comments.push({ id: doc.id, ...doc.data() });
+                });
+
+                // **重要**：在前端排序，因為 Firestore 排序需要索引
+                // 按時間倒序排列 (最新的在最上面)
+                comments.sort((a, b) => (b.timestamp?.toMillis() || 0) - (a.timestamp?.toMillis() || 0));
+
+
+                // 渲染排序後的留言
+                comments.forEach(comment => {
+                    // [NEW] 傳入 comment 物件與 doc.id
+                    const commentEl = renderComment(comment, comment.id);
+                    commentsList.appendChild(commentEl);
+                });
+
+            }, (error) => {
+                console.error("讀取留言失敗:", error);
+                loadingIndicator.innerText = "讀取留言失敗。";
+            });
+        };
+
+        // --- 7. 綁定表單提交事件 ---
+        commentForm.addEventListener('submit', handleSubmit);
+        
+        // --- [NEW] 版主功能 ---
+
+        /**
+         * 處理刪除留言
+         */
+        const handleDeleteComment = async (docId) => {
+            // 在真實應用中，這裡應該彈出一個自訂的確認框
+            console.log(`正在嘗試刪除: ${docId}`);
+            if (!docId) return;
+            try {
+                await deleteDoc(doc(db, commentsCol.path, docId));
+                console.log("留言已刪除");
+            } catch (error) {
+                console.error("刪除失敗:", error);
+            }
+        };
+
+        /**
+         * 顯示回覆輸入框
+         */
+        const handleShowReply = (commentEl, docId, existingReply = "") => {
+            // 檢查是否已經有回覆框
+            const existingForm = commentEl.querySelector('.reply-form');
+            if (existingForm) {
+                existingForm.remove();
+                return; // 再次點擊以關閉
+            }
+
+            const replyForm = document.createElement('div');
+            replyForm.className = 'reply-form mt-2 space-y-2';
+
+            const replyInput = document.createElement('textarea');
+            replyInput.className = 'w-full p-2 border border-gray-300 rounded-lg text-sm';
+            replyInput.rows = 2;
+            replyInput.placeholder = '輸入您的回覆...';
+            replyInput.value = existingReply || '';
+
+            const saveBtn = document.createElement('button');
+            saveBtn.textContent = '儲存回覆';
+            saveBtn.className = 'text-xs p-1 bg-gray-800 text-white rounded hover:bg-gray-600';
+            saveBtn.onclick = async () => {
+                const replyText = replyInput.value.trim();
+                await handleSaveReply(docId, replyText === "" ? null : replyText);
+                replyForm.remove(); // 儲存後關閉
+            };
+            
+            const cancelBtn = document.createElement('button');
+            cancelBtn.textContent = '取消';
+            cancelBtn.className = 'text-xs p-1 ml-2 bg-gray-300 rounded hover:bg-gray-400';
+            cancelBtn.onclick = () => replyForm.remove();
+
+            replyForm.appendChild(replyInput);
+            replyForm.appendChild(saveBtn);
+            replyForm.appendChild(cancelBtn);
+            
+            // 把它加在 admin actions 後面
+            commentEl.querySelector('.admin-actions').insertAdjacentElement('afterend', replyForm);
+        };
+
+        /**
+         * 儲存回覆內容到 Firestore
+         */
+        const handleSaveReply = async (docId, replyText) => {
+            const commentRef = doc(db, commentsCol.path, docId);
+            try {
+                if (replyText === null) {
+                    // 刪除回覆 (設為 null)
+                    await updateDoc(commentRef, {
+                        replyText: null,
+                        replyTimestamp: null
+                    });
+                } else {
+                    // 新增/更新回覆
+                    await updateDoc(commentRef, {
+                        replyText: replyText,
+                        replyTimestamp: Timestamp.now()
+                    });
+                }
+                console.log("回覆已儲存");
+            } catch (error) {
+                console.error("儲存回覆失敗:", error);
+            }
+        };
+
+    </script>
+</body>
+</html>
